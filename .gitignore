@@ -1,55 +1,48 @@
-# Prerequisites
-*.d
-
-# Object files
+# ===== Build output =====
+/Debug/
+/Release/
+/build/
 *.o
-*.ko
-*.obj
+*.d
 *.elf
-
-# Linker output
-*.ilk
-*.map
-*.exp
-
-# Precompiled Headers
-*.gch
-*.pch
-
-# Libraries
-*.lib
-*.a
-*.la
-*.lo
-
-# Shared objects (inc. Windows DLLs)
-*.dll
-*.so
-*.so.*
-*.dylib
-
-# Executables
-*.exe
-*.out
-*.app
-*.i*86
-*.x86_64
+*.bin
 *.hex
+*.map
+*.lst
+*.out
+*.axf
+Objects/
 
-# Debug files
-*.dSYM/
-*.su
-*.idb
-*.pdb
+# ===== STM32CubeIDE / CubeMX =====
+*.launch
+*.log
+*.tmp
+*.bak
+*.swp
+.settings/
+.metadata/
+Core/Startup/*
 
-# Kernel Module Compile Results
-*.mod*
-*.cmd
-.tmp_versions/
-modules.order
-Module.symvers
-Mkfile.old
-dkms.conf
+# ===== Keil MDK-ARM =====
+*.uvoptx
+*.uvguix*
+*.uvprojx.bak
+MDK-ARM/RTE/
+RTE/
 
-# debug information files
-*.dwo
+# ===== IDE / Editor =====
+.vscode/
+.idea/
+*.user
+*.db
+
+# ===== OS files =====
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ===== Keep these tracked =====
+!.gitignore
+!README.md
+!foc_1.ioc
+!CubeMX_Project.ioc
