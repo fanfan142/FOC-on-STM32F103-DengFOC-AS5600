@@ -27,6 +27,11 @@ Core/Startup/*
 *.uvoptx
 *.uvguix*
 *.uvprojx.bak
+MDK-ARM/foc_1/*.crf
+MDK-ARM/foc_1/*.htm
+MDK-ARM/foc_1/*.lnp
+MDK-ARM/foc_1/*.dep
+MDK-ARM/startup_*.lst
 MDK-ARM/RTE/
 RTE/
 
@@ -46,3 +51,6 @@ desktop.ini
 !README.md
 !foc_1.ioc
 !CubeMX_Project.ioc
+
+# ===== Temporary exported files =====
+foc_*_usercode_*.txt
