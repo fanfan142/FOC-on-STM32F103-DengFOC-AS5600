@@ -260,6 +260,21 @@ ACK: mode=3, Tgt=1.57
 
 ---
 
+## 🛠️ 编译与烧录
+
+本仓库提供 **Keil MDK-ARM 工程**（`MDK-ARM/foc_1.uvprojx`）与 CubeMX 工程文件（`foc_1.ioc`）。
+
+推荐流程：
+
+1. 使用 Keil 打开 `MDK-ARM/foc_1.uvprojx`；
+2. 选择目标 `foc_1`；
+3. 编译并生成固件；
+4. 通过 ST-Link 下载到 STM32F103C8T6。
+
+> 说明：仓库暂未提供通用命令行构建脚本（如 Makefile/CMake）。
+
+---
+
 ## 🚀 快速上手
 
 1. 上电并连接串口；
@@ -272,6 +287,21 @@ ACK: mode=3, Tgt=1.57
 
 ---
 
+## 🗂️ 项目结构
+
+```
+.
+├── Core/                 # 用户代码与外设初始化
+│   ├── Inc/
+│   └── Src/
+├── Drivers/              # CMSIS 与 STM32 HAL 驱动
+├── MDK-ARM/              # Keil 工程与启动文件
+├── foc_1.ioc             # CubeMX 工程配置
+└── README.md
+```
+
+---
+
 ## ⚙️ 调参建议
 
 - **电流环**：先调 q 轴，保持 d=0；
@@ -281,15 +311,26 @@ ACK: mode=3, Tgt=1.57
 
 ---
 
+## ⚠️ 安全注意事项
+
+- 首次上电请使用限流电源，避免参数错误导致大电流冲击；
+- 执行 `a`、`z` 校准命令时保持电机空载并静止；
+- 建议先低速、低电压验证旋转方向，再逐步提升目标值；
+- 若出现过流锁存，请先断电排查接线和参数后再重启。
+
+---
+
+## 🧩 未来计划
+
+- 增加更完整的参数持久化能力；
+- 补充更多调试指标与故障诊断信息；
+- 逐步补充多工具链（如命令行）构建支持。
+
+---
+
 ## 📄 开源协议
 
-推荐使用 MIT License：
-
-```
-MIT License
-Copyright (c) 2025 <Your Name>
-Permission is hereby granted, free of charge, to any person obtaining a copy...
-```
+本项目使用 MIT License，详见仓库根目录 `LICENSE` 文件。
 
 ---
 
