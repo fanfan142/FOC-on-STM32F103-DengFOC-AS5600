@@ -201,6 +201,14 @@ static void pid_reset(void);
 static void uart_safe_print(const char* s);
 /* 声明新的可靠角度读取函数 */
 static float get_stable_angle(void);
+static void set_pwm_output_zero(void);
+static void control_step_open_loop_speed(void);
+static void control_step_closed_position(void);
+static void control_step_closed_current(void);
+static void control_step_closed_speed(void);
+static void app_startup_sequence(void);
+static void app_main_loop_1khz_task(void);
+static void app_report_task(void);
 
 /* USER CODE END PFP */
 
@@ -414,6 +422,110 @@ static void set_phase_voltage(float Uq, float angle_el) {
 // [B12-aux] 读缓存电角：主循环按 1kHz 计算并写入，控制 ISR 只读
 static inline float electric_angle_from_sensor(void){ return g_angle_el_cache; }
 
+static void set_pwm_output_zero(void) {
+  __HAL_TIM_SET_COMPARE(&htim2, TIM_CHANNEL_1, 0);
+  __HAL_TIM_SET_COMPARE(&htim2, TIM_CHANNEL_2, 0);
+  __HAL_TIM_SET_COMPARE(&htim2, TIM_CHANNEL_3, 0);
+}
+
+static void control_step_open_loop_speed(void) {
+  float omega_e = (float)pole_pairs * (float)Dir * g_target;
+  el_angle = norm2pi(el_angle + omega_e * Ts);
+  set_phase_voltage(Uq_limit, el_angle);
+}
+
+static void control_step_closed_position(void) {
+  float error = g_target - g_mech_angle;
+  float Uq = pid_step(g_kp, g_ki, g_kd, error, Uq_limit);
+  set_phase_voltage(Uq, electric_angle_from_sensor());
+}
+
+static void control_step_closed_current(void) {
+  if (fault_latched) {
+    set_pwm_output_zero();
+    return;
+  }
+
+  float va = (float)adc_last[0] * ADC_K - offset_a_V;
+  float vb = (float)adc_last[1] * ADC_K - offset_b_V;
+  ia_A = va * GAIN_A;
+  ib_A = vb * GAIN_B;
+
+  if (fabsf(ia_A) > I_TRIP || fabsf(ib_A) > I_TRIP) {
+    fault_latched = 1;
+    set_pwm_output_zero();
+    return;
+  }
+
+  float ia = ia_A, ib = ib_A;
+  if (cfg_swap_ab) { float tmp=ia; ia=ib; ib=tmp; }
+
+  float Ialpha = ia;
+  float Ibeta  = (ia + 2.0f*ib) * 0.57735027f;
+
+  float angle_el = electric_angle_from_sensor() + angle_offset_el;
+  float sa = sinf(angle_el), ca = cosf(angle_el);
+  Id =  ca*Ialpha + sa*Ibeta;
+  Iq = -sa*Ialpha + ca*Ibeta;
+
+  float err_d = 0.0f - Id;
+  float err_q = Iq_ref - Iq;
+  id_integral += id_ki * err_d * Ts;
+  iq_integral += iq_ki * err_q * Ts;
+
+  float Ud_unsat = id_kp * err_d + id_integral;
+  float Uq_unsat = iq_kp * err_q + iq_integral;
+
+  float mag = sqrtf(Ud_unsat*Ud_unsat + Uq_unsat*Uq_unsat);
+  float Ud = Ud_unsat, Uq = Uq_unsat;
+  sat_flag = 0;
+  if (mag >= Uq_limit - 1e-3f) {
+    float k = Uq_limit / (mag + 1e-6f);
+    Ud *= k; Uq *= k; sat_flag = 1;
+  }
+
+  id_integral += (Ud - Ud_unsat);
+  iq_integral += (Uq - Uq_unsat);
+
+  float i_lim = Uq_limit;
+  if (id_integral >  i_lim) id_integral =  i_lim;
+  if (id_integral < -i_lim) id_integral = -i_lim;
+  if (iq_integral >  i_lim) iq_integral =  i_lim;
+  if (iq_integral < -i_lim) iq_integral = -i_lim;
+
+  if (cfg_flip_q) Uq = -Uq;
+
+  float Ualpha =  ca*Ud - sa*Uq;
+  float Ubeta  =  sa*Ud + ca*Uq;
+  float Ua = Ualpha + 0.5f*Vdc;
+  float Ub = (1.7320508f*Ubeta - Ualpha)*0.5f + 0.5f*Vdc;
+  float Uc = -(Ualpha + 1.7320508f*Ubeta)*0.5f + 0.5f*Vdc;
+
+  uint32_t ARR = __HAL_TIM_GET_AUTORELOAD(&htim2);
+  __HAL_TIM_SET_COMPARE(&htim2, TIM_CHANNEL_1, (uint32_t)(sat01(Ua/Vdc)*ARR));
+  __HAL_TIM_SET_COMPARE(&htim2, TIM_CHANNEL_2, (uint32_t)(sat01(Ub/Vdc)*ARR));
+  __HAL_TIM_SET_COMPARE(&htim2, TIM_CHANNEL_3, (uint32_t)(sat01(Uc/Vdc)*ARR));
+
+  Ud_dbg = Ud; Uq_dbg = Uq; Uabs_dbg = sqrtf(Ud*Ud + Uq*Uq);
+}
+
+static void control_step_closed_speed(void) {
+  float error_vel = g_target - g_mech_velocity;
+
+  vel_i += vel_ki * 0.5f * Ts * (error_vel + vel_last_e);
+  if (vel_i > Uq_limit) vel_i = Uq_limit;
+  if (vel_i < -Uq_limit) vel_i = -Uq_limit;
+
+  float d_term = vel_kd * (error_vel - vel_last_e) / Ts;
+  float Uq = vel_kp * error_vel + vel_i + d_term;
+
+  if (Uq > Uq_limit) Uq = Uq_limit;
+  if (Uq < -Uq_limit) Uq = -Uq_limit;
+  vel_last_e = error_vel;
+
+  set_phase_voltage(Uq, electric_angle_from_sensor());
+}
+
 
 // [B12] 控制核心（10kHz 固定节拍）：c1 开环速度 / c3 位置闭环 / c2 电流闭环（含过流锁存/抗饱和）
 static void control_step(void){
@@ -424,122 +536,18 @@ static void control_step(void){
  * 把重活（sinf/sqrtf）放这里，但频率不要太高（当前尝试10kHz；如有卡顿可以先降到2~5kHz再升）。
  */
   switch(g_mode){
-    case MODE_OL_SPEED: {
-      float omega_e = (float)pole_pairs * (float)Dir * g_target;
-      el_angle = norm2pi(el_angle + omega_e * Ts);
-      set_phase_voltage(Uq_limit, el_angle);
-    } break;
-    case MODE_CL_POS: {
-      float error = g_target - g_mech_angle;
-      float Uq = pid_step(g_kp, g_ki, g_kd, error, Uq_limit);
-      set_phase_voltage(Uq, electric_angle_from_sensor());
-    } break;
-    case MODE_CL_CURRENT: {
-        /* 过流锁存：若触发，直接拉零输出，等待你切换模式或重新校准来清除 */
-        if (fault_latched) {
-            uint32_t ARR = __HAL_TIM_GET_AUTORELOAD(&htim2);
-            __HAL_TIM_SET_COMPARE(&htim2, TIM_CHANNEL_1, 0);
-            __HAL_TIM_SET_COMPARE(&htim2, TIM_CHANNEL_2, 0);
-            __HAL_TIM_SET_COMPARE(&htim2, TIM_CHANNEL_3, 0);
-            break;
-        }
-
-        /* 1) 读取两相ADC -> 去偏置 -> 换算成电流(A) */
-        float va = (float)adc_last[0] * ADC_K - offset_a_V;
-        float vb = (float)adc_last[1] * ADC_K - offset_b_V;
-        ia_A = va * GAIN_A;  // A相
-        ib_A = vb * GAIN_B;  // B相
-
-        /* 过流检测（相电流任一超阈值即保护） */
-        if (fabsf(ia_A) > I_TRIP || fabsf(ib_A) > I_TRIP) {
-            fault_latched = 1;
-            uint32_t ARR = __HAL_TIM_GET_AUTORELOAD(&htim2);
-            __HAL_TIM_SET_COMPARE(&htim2, TIM_CHANNEL_1, 0);
-            __HAL_TIM_SET_COMPARE(&htim2, TIM_CHANNEL_2, 0);
-            __HAL_TIM_SET_COMPARE(&htim2, TIM_CHANNEL_3, 0);
-            break;
-        }
-
-        /* 2) Clarke 输入（根据开关可交换相） */
-        float ia = ia_A, ib = ib_A;
-        if (cfg_swap_ab) { float tmp=ia; ia=ib; ib=tmp; }
-
-        float Ialpha = ia;
-        float Ibeta  = (ia + 2.0f*ib) * 0.57735027f; // 1/sqrt(3)
-
-        /* 3) Park（角度 = 传感器角 + 可调偏置） */
-        float angle_el = electric_angle_from_sensor() + angle_offset_el;
-        float sa = sinf(angle_el), ca = cosf(angle_el);
-        Id =  ca*Ialpha + sa*Ibeta;
-        Iq = -sa*Ialpha + ca*Ibeta;
-
-//        /* 如需 q 轴翻转，先在电流侧翻 */
-//        if (cfg_flip_q) Iq = -Iq;
-
-        /* 4) d/q 轴 PI（带积分限幅 + 反算抗饱和） */
-        float err_d = 0.0f - Id;
-        float err_q = Iq_ref - Iq;
-        id_integral += id_ki * err_d * Ts;
-        iq_integral += iq_ki * err_q * Ts;
-
-        float Ud_unsat = id_kp * err_d + id_integral;
-        float Uq_unsat = iq_kp * err_q + iq_integral;
-
-        float mag = sqrtf(Ud_unsat*Ud_unsat + Uq_unsat*Uq_unsat);
-        float Ud = Ud_unsat, Uq = Uq_unsat;
-        sat_flag = 0;
-        if (mag >= Uq_limit - 1e-3f) {
-            float k = Uq_limit / (mag + 1e-6f);
-            Ud *= k; Uq *= k; sat_flag = 1;
-        }
-
-        /* 反算抗饱和 */
-        id_integral += (Ud - Ud_unsat);
-        iq_integral += (Uq - Uq_unsat);
-
-        float i_lim = Uq_limit;
-        if (id_integral >  i_lim) id_integral =  i_lim;
-        if (id_integral < -i_lim) id_integral = -i_lim;
-        if (iq_integral >  i_lim) iq_integral =  i_lim;
-        if (iq_integral < -i_lim) iq_integral = -i_lim;
-
-        /* 若 q 轴翻转，电压侧也同步翻，保证几何一致 */
-        if (cfg_flip_q) Uq = -Uq;
-
-        /* 5) dq -> αβ -> 三相电压，写 CCR */
-        float Ualpha =  ca*Ud - sa*Uq;
-        float Ubeta  =  sa*Ud + ca*Uq;
-        float Ua = Ualpha + 0.5f*Vdc;
-        float Ub = (1.7320508f*Ubeta - Ualpha)*0.5f + 0.5f*Vdc;
-        float Uc = -(Ualpha + 1.7320508f*Ubeta)*0.5f + 0.5f*Vdc;
-
-        uint32_t ARR = __HAL_TIM_GET_AUTORELOAD(&htim2);
-        __HAL_TIM_SET_COMPARE(&htim2, TIM_CHANNEL_1, (uint32_t)(sat01(Ua/Vdc)*ARR));
-        __HAL_TIM_SET_COMPARE(&htim2, TIM_CHANNEL_2, (uint32_t)(sat01(Ub/Vdc)*ARR));
-        __HAL_TIM_SET_COMPARE(&htim2, TIM_CHANNEL_3, (uint32_t)(sat01(Uc/Vdc)*ARR));
-
-        Ud_dbg = Ud; Uq_dbg = Uq; Uabs_dbg = sqrtf(Ud*Ud + Uq*Uq);
-    } break;
-		case MODE_CL_SPEED: {
-    // 速度误差 = 目标速度(rad/s) - 当前速度(rad/s)
-    float error_vel = g_target - g_mech_velocity;
-    
-    // 速度PID（复用位置环的PID结构，用速度环参数）
-    vel_i += vel_ki * 0.5f * Ts * (error_vel + vel_last_e);
-    if (vel_i > Uq_limit) vel_i = Uq_limit;
-    if (vel_i < -Uq_limit) vel_i = -Uq_limit;
-    
-    float d_term = vel_kd * (error_vel - vel_last_e) / Ts;
-    float Uq = vel_kp * error_vel + vel_i + d_term;
-    
-    // 输出限幅
-    if (Uq > Uq_limit) Uq = Uq_limit;
-    if (Uq < -Uq_limit) Uq = -Uq_limit;
-    vel_last_e = error_vel;
-    
-    // 使用编码器电角施加电压（与c3一致）
-    set_phase_voltage(Uq, electric_angle_from_sensor());
-} break;
+    case MODE_OL_SPEED:
+      control_step_open_loop_speed();
+      break;
+    case MODE_CL_CURRENT:
+      control_step_closed_current();
+      break;
+    case MODE_CL_POS:
+      control_step_closed_position();
+      break;
+    case MODE_CL_SPEED:
+      control_step_closed_speed();
+      break;
   }
 }
 
@@ -680,6 +688,67 @@ static void vofa_send_data(void) {
     HAL_UART_Transmit(&huart1, tail, 4, 10);
 }
 
+static void app_startup_sequence(void) {
+  HAL_TIM_PWM_Start(&htim2, TIM_CHANNEL_1);
+  HAL_TIM_PWM_Start(&htim2, TIM_CHANNEL_2);
+  HAL_TIM_PWM_Start(&htim2, TIM_CHANNEL_3);
+  HAL_ADC_Start_DMA(&hadc1, (uint32_t*)adc_raw, 2);
+  current_offsets_calib(800);
+  HAL_UART_Receive_IT(&huart1, &rx_ch, 1);
+  HAL_GPIO_WritePin(GPIOA, GPIO_PIN_8, GPIO_PIN_SET);
+  HAL_Delay(200);
+  Align_ZeroElectricalAngle();
+
+  float stable_angle = get_stable_angle();
+  g_last_mech_angle = stable_angle;
+  g_mech_angle = stable_angle;
+
+  pid_reset();
+  HAL_TIM_Base_Start_IT(&htim4);
+}
+
+static void app_main_loop_1khz_task(void) {
+  static uint32_t tick_1khz = 0;
+  if (HAL_GetTick() - tick_1khz < 1) {
+    return;
+  }
+
+  tick_1khz = HAL_GetTick();
+  update_cumulative_mechanical_angle();
+  update_mechanical_velocity();
+  g_angle_el_cache = norm2pi(g_mech_angle * pole_pairs * Dir - zero_elec_angle);
+}
+
+static void app_report_task(void) {
+  static uint32_t tick_report = 0;
+  if (HAL_GetTick() - tick_report <= 10) {
+    return;
+  }
+
+  tick_report = HAL_GetTick();
+  if (uart_output_mode == UART_MODE_VOFA) {
+    vofa_send_data();
+    return;
+  }
+
+  char line[TX_BUFFER_SIZE];
+  if (g_mode == MODE_CL_CURRENT) {
+    snprintf(line,sizeof(line),
+              "S,mode=%d,Id=%.3f,Iq=%.3f,Ud=%.2f,Uq=%.2f,|U|=%.2f,sat=%d,fault=%d\r\n",
+              (int)g_mode, Id, Iq, Ud_dbg, Uq_dbg, Uabs_dbg, (int)sat_flag, (int)fault_latched);
+  } else if (g_mode == MODE_CL_POS) {
+    snprintf(line,sizeof(line), "S,mode=%d,Tgt=%.2f,Cur=%.2f\r\n",
+              (int)g_mode, g_target, g_mech_angle);
+  } else if (g_mode == MODE_CL_SPEED) {
+    snprintf(line,sizeof(line), "S,mode=%d,TgtVel=%.2f,CurVel=%.2f\r\n",
+              (int)g_mode, g_target, g_mech_velocity);
+  } else {
+    snprintf(line,sizeof(line), "S,mode=%d,t=%.3f,el=%.3f\r\n",
+              (int)g_mode, g_target, el_angle);
+  }
+  uart_safe_print(line);
+}
+
 
 
 
@@ -731,24 +800,7 @@ int main(void)
  * 5) 用 get_stable_angle 初始化机械角累计器（last/mech 都置成当前角）；
  * 6) 清PID内部状态，最后启动 TIM4 中断（真正进入控制循环）。
  */
-  HAL_TIM_PWM_Start(&htim2, TIM_CHANNEL_1);
-  HAL_TIM_PWM_Start(&htim2, TIM_CHANNEL_2);
-  HAL_TIM_PWM_Start(&htim2, TIM_CHANNEL_3);
-  HAL_ADC_Start_DMA(&hadc1, (uint32_t*)adc_raw, 2);
-  current_offsets_calib(800);
-  HAL_UART_Receive_IT(&huart1, &rx_ch, 1);
-  HAL_GPIO_WritePin(GPIOA, GPIO_PIN_8, GPIO_PIN_SET);
-  HAL_Delay(200);
-  Align_ZeroElectricalAngle();
-
-  /* 为角度累加器举行“初始化仪式”时，也使用新函数 */
-  float angle_curr = get_stable_angle();
-  g_last_mech_angle = angle_curr;
-  g_mech_angle = angle_curr;
-//  float g_full_rotations = 0.0f; // 确保圈数为0
-
-  pid_reset();
-  HAL_TIM_Base_Start_IT(&htim4);
+  app_startup_sequence();
 
   
   /* USER CODE END 2 */
@@ -766,42 +818,8 @@ int main(void)
  * 注意：I2C读角设置了较短超时；读失败就跳过本次更新，不阻塞控制中断。
  */
 
-    static uint32_t t_angle = 0;
-    if (HAL_GetTick() - t_angle >= 1) { // ~1 kHz
-      t_angle = HAL_GetTick();
-      update_cumulative_mechanical_angle();
-      /* 电角度的计算源必须与PID控制器的位置源(g_mech_angle)保持一致*/
-		update_mechanical_velocity();  // 更新速度
-      g_angle_el_cache = norm2pi(g_mech_angle * pole_pairs * Dir - zero_elec_angle);
-    }
-
-    static uint32_t t0=0;
-if(HAL_GetTick()-t0 > 10){ // 20Hz，实际100Hz
-    t0=HAL_GetTick();
-    
-    if (uart_output_mode == UART_MODE_VOFA) {
-        // VOFA+ 模式：发送二进制波形数据
-        vofa_send_data();
-    } else {
-        // 文本模式：发送可读状态信息
-        char line[TX_BUFFER_SIZE];
-        if (g_mode == MODE_CL_CURRENT) {
-            snprintf(line,sizeof(line),
-                     "S,mode=%d,Id=%.3f,Iq=%.3f,Ud=%.2f,Uq=%.2f,|U|=%.2f,sat=%d,fault=%d\r\n",
-                     (int)g_mode, Id, Iq, Ud_dbg, Uq_dbg, Uabs_dbg, (int)sat_flag, (int)fault_latched);
-        } else if (g_mode == MODE_CL_POS) {
-            snprintf(line,sizeof(line), "S,mode=%d,Tgt=%.2f,Cur=%.2f\r\n", 
-                     (int)g_mode, g_target, g_mech_angle);
-        } else if (g_mode == MODE_CL_SPEED) {
-            snprintf(line,sizeof(line), "S,mode=%d,TgtVel=%.2f,CurVel=%.2f\r\n",
-                     (int)g_mode, g_target, g_mech_velocity);
-        } else {
-            snprintf(line,sizeof(line), "S,mode=%d,t=%.3f,el=%.3f\r\n", 
-                     (int)g_mode, g_target, el_angle);
-        }
-        uart_safe_print(line);
-    }
-}
+    app_main_loop_1khz_task();
+    app_report_task();
 		 
 		
 		
