@@ -422,24 +422,28 @@ static void set_phase_voltage(float Uq, float angle_el) {
 // [B12-aux] 读缓存电角：主循环按 1kHz 计算并写入，控制 ISR 只读
 static inline float electric_angle_from_sensor(void){ return g_angle_el_cache; }
 
+// [B12-aux] PWM紧急拉零：三相占空比全部置0（用于故障或锁存保护）
 static void set_pwm_output_zero(void) {
   __HAL_TIM_SET_COMPARE(&htim2, TIM_CHANNEL_1, 0);
   __HAL_TIM_SET_COMPARE(&htim2, TIM_CHANNEL_2, 0);
   __HAL_TIM_SET_COMPARE(&htim2, TIM_CHANNEL_3, 0);
 }
 
+// [B12-OL] 开环速度：按目标速度积分电角并输出固定Uq
 static void control_step_open_loop_speed(void) {
   float omega_e = (float)pole_pairs * (float)Dir * g_target;
   el_angle = norm2pi(el_angle + omega_e * Ts);
   set_phase_voltage(Uq_limit, el_angle);
 }
 
+// [B12-POS] 位置闭环：位置PID输出Uq，使用传感器电角施加电压
 static void control_step_closed_position(void) {
   float error = g_target - g_mech_angle;
   float Uq = pid_step(g_kp, g_ki, g_kd, error, Uq_limit);
   set_phase_voltage(Uq, electric_angle_from_sensor());
 }
 
+// [B12-CUR] 电流闭环FOC：采样->Clarke/Park->dq PI+抗饱和->逆变->SVPWM，含过流锁存
 static void control_step_closed_current(void) {
   if (fault_latched) {
     set_pwm_output_zero();
@@ -509,6 +513,7 @@ static void control_step_closed_current(void) {
   Ud_dbg = Ud; Uq_dbg = Uq; Uabs_dbg = sqrtf(Ud*Ud + Uq*Uq);
 }
 
+// [B12-SPD] 速度闭环：速度PID输出Uq，使用传感器电角施加电压
 static void control_step_closed_speed(void) {
   float error_vel = g_target - g_mech_velocity;
 
@@ -688,6 +693,7 @@ static void vofa_send_data(void) {
     HAL_UART_Transmit(&huart1, tail, 4, 10);
 }
 
+// [B13] 上电启动序列：PWM/ADC/UART启动、偏置校准、零电角对齐、控制中断使能
 static void app_startup_sequence(void) {
   HAL_TIM_PWM_Start(&htim2, TIM_CHANNEL_1);
   HAL_TIM_PWM_Start(&htim2, TIM_CHANNEL_2);
@@ -707,6 +713,7 @@ static void app_startup_sequence(void) {
   HAL_TIM_Base_Start_IT(&htim4);
 }
 
+// [B14-1kHz] 慢任务1：约1kHz更新机械角、机械速度和电角缓存
 static void app_main_loop_1khz_task(void) {
   static uint32_t tick_1khz = 0;
   if (HAL_GetTick() - tick_1khz < 1) {
@@ -719,6 +726,7 @@ static void app_main_loop_1khz_task(void) {
   g_angle_el_cache = norm2pi(g_mech_angle * pole_pairs * Dir - zero_elec_angle);
 }
 
+// [B14-report] 慢任务2：约100Hz串口上报（VOFA二进制或文本状态）
 static void app_report_task(void) {
   static uint32_t tick_report = 0;
   if (HAL_GetTick() - tick_report <= 10) {
