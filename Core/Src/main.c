@@ -726,7 +726,7 @@ static void app_main_loop_1khz_task(void) {
   g_angle_el_cache = norm2pi(g_mech_angle * pole_pairs * Dir - zero_elec_angle);
 }
 
-// [B14-report] 慢任务2：约100Hz串口上报（VOFA二进制或文本状态）
+// [B14-report] 慢任务2：约90Hz串口上报（VOFA二进制或文本状态）
 static void app_report_task(void) {
   static uint32_t tick_report = 0;
   if (HAL_GetTick() - tick_report <= 10) {
